@@ -1,9 +1,7 @@
 Correction of dual-PRF velocity dealiasing errors
 =================================================
 
-This repository includes a function for correction of dual-PRF errors in weather radar Doppler velocity data. 
-
-These dual-PRF dealiasing errors constitute a serious handicap for the global dealiasing of the radial velocity field and for derived applications such as wind field estimation and meteorological signature detection.
+This repository includes a function for correcting the dealiasing errors that arise in weather radar Doppler velocity data that have been collected using the dual-PRF technique. 
 
 The function integrates four image processing methods developed in the literature, which apply field continuity for identification and correction of the errors. 
 
