@@ -1,8 +1,0 @@
-name: vcorexamples
-dependencies:
-  - numpy
-  - scipy
-  - math
-  - pip
-  - pip:
-    - arm-pyart
