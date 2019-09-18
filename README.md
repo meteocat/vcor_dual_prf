@@ -51,11 +51,13 @@ correct_dualprf (radar, method_det, ...)
 | new_field | str | 'velocity_cor' | Corrected velocity field name in the output radar object | NA |
 | new_field_lname | str | 'Outlier corrected dual-PRF velocity'' | Corrected velocity field LONG name in the output radar object | NA |
 
-## Future/ work
-
-- Implement a subroutine that identifies the PRF at which each radial has been scanned (see e.g. [Holleman and Beekhuis, 2003](https://journals.ametsoc.org/doi/full/10.1175/1520-0426%282003%2920%3C443%3AAACODP%3E2.0.CO%3B2))
+## Further work
 
 - Test on different input data formats
 
+- Implement a subroutine that identifies the PRF at which each radial has been scanned (see e.g. [Holleman and Beekhuis, 2003](https://journals.ametsoc.org/doi/full/10.1175/1520-0426%282003%2920%3C443%3AAACODP%3E2.0.CO%3B2))
+
 - Speed median filtering with masked arrays?
+
+### ALL SUGGESTIONS ARE WELCOME!!!
 
