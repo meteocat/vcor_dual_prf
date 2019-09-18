@@ -21,7 +21,7 @@ Correct dual-PRF dealiasing errors
     _dummy_cols
     _get_prf_pars
     _mask_diff_above
-    _min_gates_mask
+    _min_valid_mask
     _prf_factor_array
     _prf_hl_kernels
     _sign_array
@@ -30,11 +30,11 @@ Correct dual-PRF dealiasing errors
 """
 
 def correct_dualprf(radar, method_det, vel_field='velocity', 
-                    kernel_det=np.ones(7,7), min_gates_det=1, 
+                    kernel_det=np.ones(7,7), min_valid_det=1, 
                     max_dev=1.0, two_step=True, method_cor=None, 
-                    kernel_cor=None, min_gates_cor=1, new_field='velocity_cor',
+                    kernel_cor=None, min_valid_cor=1, new_field='velocity_cor',
                     replace=False, new_field_name='velocity_cor', 
-                    new_field_lname='Dual-PRF outlier corrected velocity'):
+                    new_field_lname='Outlier corrected dual-PRF velocity'):
     """
     Correction of dual-PRF outliers in radar velocity data. 
     Includes the corrected field in the input radar object. 
@@ -57,7 +57,7 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
     kernel_det : array
         Neighbour kernel, 1/0 values (detection), if None a 7x7 ones array 
         is used, excluding the central value
-    min_gates_det : int
+    min_valid_det : int
         Minimum number of valid neighbours (detection)
     max_dev : float
         Maximum deviation threshold (detection)
@@ -69,7 +69,7 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
         propagation issues when PRF scaling)
     kernel_cor : array
         Neighbour kernel 1/0 values (correction), if None, kernel_det is used
-    min_gates_cor : int
+    min_valid_cor : int
         Minimum number of valid neighbours (correction)
     new_field : str
         Output (corrected) velocity field name
@@ -105,7 +105,7 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
         ref_stat_det = _stat_ref(data_ma=v, method=method_det, 
                               kernel=kernel_det, v_ny=v_ny, mask=None,
                               prf_factor_arr=prf_factor_sw, 
-                              min_gates=min_gates_det)
+                              min_valid=min_valid_det)
         
         if method_det=='cmean_sc':
             diff = circular_diff(dat1=v*(m.pi/v_ny), dat2=ref_stat_det,
@@ -138,7 +138,7 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
                                   kernel=kernel_cor, v_ny=v_ny, 
                                   mask=mask_2stp, 
                                   prf_factor_arr=prf_factor_sw, 
-                                  min_gates=min_gates_cor)
+                                  min_valid=min_valid_cor)
 
         else:
             ref_stat_cor = ref_stat_det
@@ -545,7 +545,7 @@ def _mask_diff_above(diff_ma, th_ma):
     return mask.astype(bool)
 
 
-def _min_gates_mask(mask, kernel, min_th=1):
+def _min_valid_mask(mask, kernel, min_th=1):
     """
     Mask for gates that do not have a minimum number of valid neighbours
     
@@ -644,7 +644,7 @@ def _sign_array(prf_factor_arr):
 
 
 def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None, 
-            mask=None, prf_factor_arr=None, min_gates=1):
+            mask=None, prf_factor_arr=None, min_valid=1):
     """
     Estimate reference velocity using different local statistics:
     'mean' : local mean velocity (Joe and May, 2003)
@@ -664,7 +664,7 @@ def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
         User-defined mask
     prf_factor_arr : array (1D)
         Dual-PRF factor of each ray (e.g.: N+1: high-PRF, N: low-PRF)
-    min_gates : int
+    min_valid : int
         Minimum number of valid neighbours
 
      Returns
@@ -679,15 +679,15 @@ def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
     if method == 'cmean_sc':
         v_ref = _phref_cmean_sc(vel_ma, kernel=kernel, v_ny=v_ny, 
                               mask=mask, prf_factor_arr=prf_factor_arr,
-                              min_gates=min_gates)
+                              min_valid=min_valid)
 
     else:
         stat_fn = {'mean': local_mean, 'median': local_median,
                    'cmean': local_cmean}
  
         # Mask gates which do not have a minimum number of neighbours
-        nmin_mask = _min_gates_mask(mask, kernel=kernel,
-                                        min_th=min_gates)
+        nmin_mask = _min_valid_mask(mask, kernel=kernel,
+                                        min_th=min_valid)
         new_mask = np.ma.mask_or(data_ma.mask, nmin_mask)
 
         if method == 'cmean':
@@ -706,7 +706,7 @@ def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
 
 
 def _phref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None, 
-                  mask=None, prf_factor_arr=None, min_gates=1):
+                  mask=None, prf_factor_arr=None, min_valid=1):
     """
     Estimate reference velocity using 'cmean_sc' method (Altube et al., 2017):
     local circular mean velocity, phase space statistics with PRF-based scaling.
@@ -731,8 +731,8 @@ def _phref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None,
     ph_ref = sign_arr*(b_l-b_h)
 
     # Mask gates which do not have a minimum number of neighbours
-    mask_h = _min_gates_mask(mask, kernel=k_h, min_th=min_gates)
-    mask_l = _min_gates_mask(mask, kernel=k_l, min_th=min_gates)
+    mask_h = _min_valid_mask(mask, kernel=k_h, min_th=min_valid)
+    mask_l = _min_valid_mask(mask, kernel=k_l, min_th=min_valid)
     nmin_mask = np.ma.mask_or(mask_h, mask_l)
     new_mask = np.ma.mask_or(data_ma.mask, nmin_mask)
 
