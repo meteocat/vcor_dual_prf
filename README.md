@@ -1,4 +1,4 @@
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/meteocat/vcor_dual_prf/master?filepath=.%2Fexamples%2Fexamples_index.ipynb)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/meteocat/vcor_dual_prf/master?filepath=.%2Fexamples%2F01_correct_and_display.ipynb)
 
 Correction of dual-PRF velocity dealiasing errors
 =================================================
