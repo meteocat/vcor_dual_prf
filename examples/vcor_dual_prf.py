@@ -30,7 +30,7 @@ Correct dual-PRF dealiasing errors
 """
 
 def correct_dualprf(radar, method_det, vel_field='velocity', 
-                    kernel_det=np.ones((7,7)),  _det=1, 
+                    kernel_det=np.ones((7,7)), min_valid_det=1, 
                     max_dev=1.0, two_step=True, method_cor=None, 
                     kernel_cor=None, min_valid_cor=1, new_field='velocity_cor',
                     replace=False, new_field_name='velocity_cor', 

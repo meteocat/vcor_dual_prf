@@ -25,16 +25,16 @@ Correct dual-PRF dealiasing errors
     _prf_factor_array
     _prf_hl_kernels
     _sign_array
-    _stat_ref
+    _vel_ref
     _vref_cmean_sc
 """
 
 def correct_dualprf(radar, method_det, vel_field='velocity', 
-                    kernel_det=np.ones(7,7), min_valid_det=1, 
+                    kernel_det=np.ones((7,7)), min_valid_det=1, 
                     max_dev=1.0, two_step=True, method_cor=None, 
                     kernel_cor=None, min_valid_cor=1, new_field='velocity_cor',
                     replace=False, new_field_name='velocity_cor', 
-                    new_field_lname='Outlier corrected dual-PRF velocity'):
+                    new_field_lname='Dual-PRF outlier corrected velocity'):
     """
     Correction of dual-PRF outliers in radar velocity data. 
     Includes the corrected field in the input radar object. 
@@ -42,7 +42,7 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
     Available reference statistics:
     'mean' : local mean velocity (Joe and May, 2003)
     'median' : local median velocity (Holleman and Beekhuis, 2003)
-    'cmean_sc' : local circular mean velocity (Altube et al., 2017)
+    'cmean_sc' : local circular mean velocity (PRF-scaled) (Altube et al., 2017)
     'cmean' : local circular mean velocity (Hengstebeck et al., 2018)
                 
 
@@ -91,9 +91,6 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
     # primary velocities
     vp = v_ny/prf_factor
     
-    if method_det=='cmean_sc':
-        two_step = True
-        
     for sw, sw_slice in enumerate(radar.iter_slice()):
 
         v = radar.fields[vel_field]['data'][sw_slice]
@@ -102,20 +99,13 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
 
         # ERROR DETECTION
         # Reference velocities at each gate
-        ref_stat_det = _stat_ref(data_ma=v, method=method_det, 
+        ref_vel_det = _vel_ref(data_ma=v, method=method_det, 
                               kernel=kernel_det, v_ny=v_ny, mask=None,
                               prf_factor_arr=prf_factor_sw, 
                               min_valid=min_valid_det)
-        
-        if method_det=='cmean_sc':
-            diff = circular_diff(dat1=v*(m.pi/v_ny), dat2=ref_stat_det,
-                                 mod=2*m.pi)
-            diff_ma = diff*(v_ny/m.pi)
-        else:
-            diff_ma = (v-ref_stat_det)
-        
         # Outlier mask
-        err_mask = _mask_diff_above(diff_ma=diff_ma, th_ma=max_dev*vp_sw)
+        err_mask = _mask_diff_above(data_ma=v, ref_ma=ref_vel_det, 
+                                   th_ma=max_dev*vp_sw)
 
         if two_step:
 
@@ -129,23 +119,19 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
                     method_cor = 'median'
                 else:
                     method_cor = method_det
-                    
-            if method_cor=='cmean_sc':
-                method_cor = 'median'
-                
 
-            ref_stat_cor = _stat_ref(data_ma=v, method=method_cor, 
+            ref_vel_cor = _vel_ref(data_ma=v, method=method_cor, 
                                   kernel=kernel_cor, v_ny=v_ny, 
                                   mask=mask_2stp, 
                                   prf_factor_arr=prf_factor_sw, 
                                   min_valid=min_valid_cor)
 
         else:
-            ref_stat_cor = ref_stat_det
+            ref_vel_cor = ref_vel_det
 
         # ERROR CORRECTION
         # Unwrap number and corrected velocity field
-        uwp = _dualprf_error_unwrap(data_ma=v, ref_ma=ref_stat_cor, 
+        uwp = _dualprf_error_unwrap(data_ma=v, ref_ma=ref_vel_cor, 
                                    err_mask=err_mask, pvel_arr=vp_sw, 
                                    prf_arr=prf_factor_sw)
 
@@ -158,22 +144,6 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
     _add_vcor_field(radar, field_i=vel_field, field_o=new_field, 
                         data=vcorr, std_name=new_field_name, 
                         long_name=new_field_lname, replace=replace)
-
-
-def circular_diff(dat1, dat2, mod=360):
-"""
-Calculate minimum difference between two circular quantities
-
-"""
-
-  diff1 = (dat2-dat1)%mod
-  diff2 = (dat1-dat2)%mod
-  
-  diff1[diff2<diff1] = -diff2[diff2<diff1]
-  
-  return(diff1)
-}
-
 
 
 def fold_circular(data_ma, mod):
@@ -519,15 +489,17 @@ def _get_prf_pars(radar):
     return v_nyq, prf_h, prf_fact, prf_flag
 
 
-def _mask_diff_above(diff_ma, th_ma):
+def _mask_diff_above(data_ma, ref_ma, th_ma):
     """
     Creates a mask of the values which differ from a reference more
     than a specified threshold
 
     Parameters
     ----------
-    diff_ma : masked array
-        Difference data
+    data_ma : masked array
+        Data
+    ref_ma : masked array
+        Reference data
     th_ma :  masked array
         Threshold values
 
@@ -538,9 +510,11 @@ def _mask_diff_above(diff_ma, th_ma):
          
      """
 
-    mask = np.zeros(diff_ma.shape)
-    mask[np.ma.abs(diff_ma) > th_ma] = 1
-    mask[diff_ma.mask] = 0
+    ndev_ma = data_ma - ref_ma
+
+    mask = np.zeros(ndev_ma.shape)
+    mask[np.ma.abs(ndev_ma) > th_ma] = 1
+    mask[ndev_ma.mask] = 0
 
     return mask.astype(bool)
 
@@ -643,7 +617,7 @@ def _sign_array(prf_factor_arr):
     return sign_arr
 
 
-def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None, 
+def _vel_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None, 
             mask=None, prf_factor_arr=None, min_valid=1):
     """
     Estimate reference velocity using different local statistics:
@@ -677,7 +651,7 @@ def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
     vel_ma = np.ma.array(data=data_ma.data, mask=mask)
 
     if method == 'cmean_sc':
-        v_ref = _phref_cmean_sc(vel_ma, kernel=kernel, v_ny=v_ny, 
+        v_ref = _vref_cmean_sc(vel_ma, kernel=kernel, v_ny=v_ny, 
                               mask=mask, prf_factor_arr=prf_factor_arr,
                               min_valid=min_valid)
 
@@ -705,7 +679,7 @@ def _stat_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
     return v_ref
 
 
-def _phref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None, 
+def _vref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None, 
                   mask=None, prf_factor_arr=None, min_valid=1):
     """
     Estimate reference velocity using 'cmean_sc' method (Altube et al., 2017):
@@ -736,6 +710,6 @@ def _phref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None,
     nmin_mask = np.ma.mask_or(mask_h, mask_l)
     new_mask = np.ma.mask_or(data_ma.mask, nmin_mask)
 
-    ph_ref = np.ma.array(data=ph_ref, mask=new_mask)
+    v_ref = np.ma.array(data=ph_ref*(v_ny/m.pi), mask=new_mask)
 
-    return ph_ref
+    return v_ref
