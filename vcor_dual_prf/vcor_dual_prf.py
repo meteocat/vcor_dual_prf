@@ -1,5 +1,6 @@
 
 import pyart
+import h5py
 import numpy as np
 import math as m
 from scipy import ndimage
@@ -11,15 +12,16 @@ Correct dual-PRF dealiasing errors
 
     correct_dualprf
     fold_circular
+    instrument_parameters_odim5
     local_cmean
     local_mean
     local_median
     local_valid
     _add_vcor_field
-    _default_4ref
     _dualprf_error_unwrap
     _dummy_cols
     _get_prf_pars
+    _get_prf_pars_odimh5
     _mask_diff_above
     _min_valid_mask
     _prf_factor_array
@@ -30,7 +32,7 @@ Correct dual-PRF dealiasing errors
 """
 
 def correct_dualprf(radar, method_det, vel_field='velocity', 
-                    kernel_det=np.ones((7,7)), min_valid_det=1, 
+                    kernel_det=np.ones((7,7)), min_valid_det=1, 
                     max_dev=1.0, two_step=True, method_cor=None, 
                     kernel_cor=None, min_valid_cor=1, new_field='velocity_cor',
                     replace=False, new_field_name='velocity_cor', 
@@ -90,53 +92,64 @@ def correct_dualprf(radar, method_det, vel_field='velocity',
     
     # primary velocities
     vp = v_ny/prf_factor
-    
+
     for sw, sw_slice in enumerate(radar.iter_slice()):
 
-        v = radar.fields[vel_field]['data'][sw_slice]
+        v_sw = radar.fields[vel_field]['data'][sw_slice]
         vp_sw = vp[sw_slice]
         prf_factor_sw = prf_factor[sw_slice]
-
+        
         # ERROR DETECTION
         # Reference velocities at each gate
-        ref_vel_det = _vel_ref(data_ma=v, method=method_det, 
-                              kernel=kernel_det, v_ny=v_ny, mask=None,
+        vref_det = _vel_ref(data_ma=v_sw, method=method_det, 
+                              kernel=kernel_det, v_ny=v_ny, 
+                              mask=None,
                               prf_factor_arr=prf_factor_sw, 
                               min_valid=min_valid_det)
+
+        if (method_det=='cmean')|(method_det=='cmean_sc'):
+            # Calculate difference in phase space
+            ph_obs = v_sw*(m.pi/v_ny)
+            ph_ref = vref_det*(m.pi/v_ny)
+            
+            ph_diff = ph_obs - ph_ref
+            diff_ma = (v_ny/m.pi)*np.ma.arctan2(np.ma.sin(ph_diff), np.ma.cos(ph_diff))
+            
+        else:                       
+            diff_ma = v_sw - vref_det
+
         # Outlier mask
-        err_mask = _mask_diff_above(data_ma=v, ref_ma=ref_vel_det, 
-                                   th_ma=max_dev*vp_sw)
+        err_mask = _mask_diff_above(diff_ma=diff_ma, th_ma=max_dev*vp_sw)
 
         if two_step:
-
-            mask_2stp = np.ma.mask_or(v.mask, err_mask)
 
             if kernel_cor is None:
                 kernel_cor = kernel_det
 
             if method_cor is None:
-                if method_det=='cmean_sc':
+                if (method_det=='cmean')|(method_det=='cmean_sc'):
                     method_cor = 'median'
                 else:
                     method_cor = method_det
 
-            ref_vel_cor = _vel_ref(data_ma=v, method=method_cor, 
+            vref_cor = _vel_ref(data_ma=v_sw, method=method_cor, 
                                   kernel=kernel_cor, v_ny=v_ny, 
-                                  mask=mask_2stp, 
+                                  mask=err_mask, 
                                   prf_factor_arr=prf_factor_sw, 
                                   min_valid=min_valid_cor)
 
         else:
-            ref_vel_cor = ref_vel_det
+            vref_cor = vref_det
 
         # ERROR CORRECTION
         # Unwrap number and corrected velocity field
-        uwp = _dualprf_error_unwrap(data_ma=v, ref_ma=ref_vel_cor, 
+        uwp = _dualprf_error_unwrap(data_ma=v_sw, ref_ma=vref_cor, 
                                    err_mask=err_mask, pvel_arr=vp_sw, 
                                    prf_arr=prf_factor_sw)
 
         # Correct velocity field
-        vc = v + 2 * uwp * vp_sw
+        vc = v_sw + 2 * uwp * vp_sw
+        
         # Fold velocity values into Nyquist interval
         vcorr[sw_slice] = fold_circular(data_ma=vc, mod=v_ny)
 
@@ -164,13 +177,69 @@ def fold_circular(data_ma, mod):
         Folded data
     """
 
-    scl = np.ones(data_ma.shape)*mod
-    scl[np.ma.where(data_ma < 0)] *= -1
-    scl[np.ma.where(np.ma.abs(data_ma) > mod)] *= -1
-
-    ma_fold = np.ma.mod(data_ma, scl)
+    # Phase space
+    ph = data_ma*m.pi/mod
+    ph_fold = np.ma.arctan2(np.ma.sin(ph), np.ma.cos(ph))
+    
+    # Back to original variable
+    ma_fold = ph_fold*mod/m.pi
 
     return ma_fold
+
+
+def instrument_parameters_odim5(radar, odim_file):
+    """
+    Builds the dictionary 'instrument_parameters' in the radar instance, 
+    using the parameter metadata in the input odim5 file.
+
+    Parameters
+    ----------
+    radar : Radar
+        Py-ART radar structure
+    odim_file : str
+        Complete path and filename of input file
+
+    Returns
+    -------
+    radar : Radar
+        Py-ART radar structure with added 'instrument_parameters'.
+    """
+
+    ny, prt, prt_mode, prt_ratio, prf_flag = _get_prf_pars_odimh5(odim_file, nrays=radar.nrays, 
+                                                                  nsweeps=radar.nsweeps, sw_start_end=radar.get_start_end)
+    
+    # Create dictionaries
+    mode_dict = {'comments': 'Pulsing mode Options are: "fixed", "staggered", "dual". Assumed "fixed" if missing.',
+                 'meta_group': 'instrument_parameters',
+                 'long_name': 'Pulsing mode',
+                 'units': 'unitless',
+                 'data': prt_mode}
+    prt_dict = {'units': 'seconds',
+                'comments': 'Pulse repetition time. For staggered prt, also see prt_ratio.',
+                'meta_group': 'instrument_parameters',
+                'long_name': 'Pulse repetition time',
+                'data': prt}
+    ratio_dict = {'units': 'unitless',
+                 'meta_group': 'instrument_parameters',
+                 'long_name': 'Pulse repetition frequency ratio',
+                 'data': prt_ratio}
+    ny_dict = {'units': 'meters_per_second',
+               'comments': 'Unambiguous velocity',
+               'meta_group': 'instrument_parameters',
+               'long_name': 'Nyquist velocity',
+               'data': ny}
+    flag_dict = {'units': 'unitless',
+                 'comments': 'PRF used to collect ray. 0 for high PRF, 1 for low PRF.',
+                 'meta_group': 'instrument_parameters',
+                 'long_name': 'PRF flag',
+                 'data': prf_flag}
+
+    # add metadata in radar object:
+    radar.instrument_parameters = {'nyquist_velocity':ny_dict, 'prt':prt_dict, 
+                                   'prt_ratio':ratio_dict, 'prt_mode':mode_dict, 
+                                   'prf_flag':flag_dict}
+    
+    return radar
 
 
 def local_cmean(data_ma, kernel):
@@ -184,6 +253,11 @@ def local_cmean(data_ma, kernel):
         Data
     kernel : array
         Local neighbour kernel, 1/0 values
+
+    Returns
+    -------
+    cmean_ma : masked array
+        Local circular mean of the data.
     """
 
     # Arrays of trigonometric variables
@@ -212,6 +286,10 @@ def local_mean(data_ma, kernel):
     kernel : array
         Local neighbour kernel, 1/0 values
 
+    Returns
+    -------
+    avg_ma : masked array
+        Local mean of the data.
     """
 
     data = data_ma.data
@@ -241,6 +319,17 @@ def local_median(data_ma, kernel):
     Calculates local median of a masked array;
     edges are wrapped in azimuth and padded with NA in range.
 
+    Parameters
+    ----------
+    data_ma : masked array
+        Data
+    kernel : array
+        Local neighbour kernel, 1/0 values
+
+    Returns
+    -------
+    med_ma : masked array
+        Local median of the data
     """
 
     data = data_ma.data
@@ -281,8 +370,8 @@ def local_valid(mask, kernel=np.ones((3, 3))):
     """
 
     # Add dummy columns to mask
-    mask_tmp = (~mask).astype(int)
-    ncols, mask_tmp = _dummy_cols(mask_tmp, kernel, value=0)
+    mask = (~mask).astype(int)
+    ncols, mask_tmp = _dummy_cols(mask, kernel, value=0)
 
     # Convolve with kernel to calculate number of valid neighbours
     valid_tmp = ndimage.convolve(mask_tmp, kernel, mode='wrap')
@@ -327,26 +416,6 @@ def _add_vcor_field(radar, field_i, field_o, data, std_name=None,
         radar.fields[field_o]['standard_name'] = std_name
 
 
-def _default_4ref(data_ma, mask, v_ny, prf_factor_arr):
-    """
-    Returns default argument values for reference velocity functions
-    in case they are not defined by user.
-    """
-
-    # Use the user-specified mask
-    if mask is None:
-        mask = data_ma.mask
-
-    if v_ny is None:
-        v_ny = 1
-
-    if prf_factor_arr is None:
-        prf_factor_arr = np.ones(data_ma.ones)
-        prf_factor_arr[1::2] = 0
-
-    return mask, v_ny, prf_factor_arr
-
-
 def _dualprf_error_unwrap(data_ma, ref_ma, err_mask, pvel_arr, prf_arr):
     """
     Finds the correction factor that minimises the difference between
@@ -372,9 +441,9 @@ def _dualprf_error_unwrap(data_ma, ref_ma, err_mask, pvel_arr, prf_arr):
      """
 
     # Convert non-outliers to zero
-    ma_out = data_ma * err_mask
-    th_arr_out = pvel_arr * err_mask
-    ref_out = ref_ma * err_mask
+    ma_out = data_ma * err_mask.astype(int)
+    th_arr_out = pvel_arr * err_mask.astype(int)
+    ref_out = ref_ma * err_mask.astype(int)
 
     # Primary velocity and prf factor of low PRF gates
     prf_factor = np.unique(np.min(prf_arr))[0]
@@ -486,10 +555,86 @@ def _get_prf_pars(radar):
     if prt_mode == b'dual':
         prf_flag = pars['prf_flag']['data']
 
-    return v_nyq, prf_h, prf_fact, prf_flag
+    return v_nyq, prf_h, prf_fact, prf_flag.astype(int)
 
 
-def _mask_diff_above(data_ma, ref_ma, th_ma):
+def _get_prf_pars_odimh5(odim_file, nrays, nsweeps, sw_start_end):
+    """
+    Credit: Joshua Soderholm (joshua-wx)
+    
+    Retrieves PRF scanning parameters from odim5 file, shaped for 
+    building the 'instrument_parameters' dictionary: 
+    nyquist velocity, PRF, dual PRF factor and PRF flags for each ray
+    (if batch mode dual-PRF).
+
+    Parameters
+    ----------
+    radar : Radar
+        Py-ART radar structure
+
+    Returns
+    -------
+    ny_array : numpy array (float)
+        Nyquist velocity for each ray.
+    prt_array : numpy array (float)
+        PRT for each ray.
+    prt_mode_array: numpy array (str)
+        PRT mode for each sweep, 'dual' or 'fixed'.
+    prt_ratio_array: numpy array (float)
+        PRT ratio for each ray.
+    prf_flag_array: numpy array (bool int)
+        Ray PRF flag, high (0) or low (1) PRF.    
+    """
+
+    ny_array = np.zeros(nrays)
+    prt_array = np.zeros(nrays)
+    prt_mode_array = np.repeat(b'single', nsweeps)
+    prt_ratio_array = np.ones(nrays)
+    prf_flag_array = np.zeros(nrays)
+
+    with h5py.File(odim_file, 'r') as hfile:
+    
+        for sw in range(0, nsweeps):
+    
+            # extract PRF/NI data from odimh5 file
+            d_name = 'dataset' + str(sw+1)
+            d_how = hfile[d_name]['how'].attrs
+            ny = d_how['NI']              # Nyquist
+            prf_h = d_how['highprf']
+            prf_ratio = d_how['rapic_UNFOLDING'] # the prf ratio (e.g. 2:3 etc) or None
+            prf_type = d_how['rapic_HIPRF']
+    
+            # extract rays for current sweep
+            ray_s, ray_e = sw_start_end(sw) # start and end rays of sweep
+            ray_e += 1
+
+            # Assign values
+            prt_array[ray_s:ray_e] = 1/prf_h
+            ny_array[ray_s:ray_e] = ny
+    
+            if prf_ratio != 'None':
+        
+                prt_mode_array[sw] = b'dual'
+        
+                fact_h = float(prf_ratio.decode('ascii')[0])
+                fact_l = float(prf_ratio.decode('ascii')[2])
+        
+                prt_ratio_array[ray_s:ray_e] = fact_l/fact_h
+                flag_sw = prf_flag_array[ray_s:ray_e]
+        
+                if prf_type==b'EVENS':
+                    flag_sw[::2] = 1 # with 1 as the first index, 1=1, 2=0, 3=1
+                elif prf_type==b'ODDS': #odds=0, evens=1
+                    flag_sw[1::2] = 1 #with 1 as the first index, 1=0, 2=1, 3=0
+                else:
+                    print('error, unknown flag type', prf_type)
+            else:
+                prt_mode_array[sw] = b'fixed'
+
+    return ny_array, prt_array, prt_mode_array, prt_ratio_array, prf_flag_array.astype(int)
+                
+    
+def _mask_diff_above(diff_ma, th_ma):
     """
     Creates a mask of the values which differ from a reference more
     than a specified threshold
@@ -510,11 +655,9 @@ def _mask_diff_above(data_ma, ref_ma, th_ma):
          
      """
 
-    ndev_ma = data_ma - ref_ma
-
-    mask = np.zeros(ndev_ma.shape)
-    mask[np.ma.abs(ndev_ma) > th_ma] = 1
-    mask[ndev_ma.mask] = 0
+    mask = np.zeros(diff_ma.shape)
+    mask[np.ma.abs(diff_ma) > th_ma] = 1
+    mask[diff_ma.mask] = 0
 
     return mask.astype(bool)
 
@@ -561,9 +704,9 @@ def _prf_factor_array(radar):
         print('WARNING: prf_flag is missing.')
 
     else:
-        flag_vec = np.logical_not(prf_flag).astype(int)
+        flag_vec = prf_flag
 
-    flag_arr = np.transpose(np.tile(flag_vec, (dim[1], 1)))
+    flag_arr = np.transpose(np.tile(flag_vec.astype(int), (dim[1], 1)))
     prf_fac_arr = flag_arr + prf_fact
 
     return prf_fac_arr
@@ -572,7 +715,7 @@ def _prf_factor_array(radar):
 def _prf_hl_kernels(kernel):
     """
     Separates the kernel into high-PRF and low-PRF gate kernels, 
-    assuming that central gate is low-PRF
+    assuming always that the central gate is low-PRF
 
     Parameters
     ----------
@@ -598,7 +741,7 @@ def _prf_hl_kernels(kernel):
 def _sign_array(prf_factor_arr):
     """
      Builds a signature array based on the PRF at the scanned gate 
-     (+1 for high-PRF, -1 for low PRF)
+     (-1 for high-PRF, +1 for low PRF)
 
      Parameters
      ----------
@@ -608,7 +751,7 @@ def _sign_array(prf_factor_arr):
      Returns
      -------
      sign_arr : array
-         Neighbour kernel (1/0 values) for high-PRF (h) or low-PRF (l)
+         Neighbour kernel (-1/1 values) for high-PRF (h) or low-PRF (l)
      """
 
     sign_arr = np.ones(prf_factor_arr.shape)
@@ -637,7 +780,7 @@ def _vel_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
     mask : bool array
         User-defined mask
     prf_factor_arr : array (1D)
-        Dual-PRF factor of each ray (e.g.: N+1: high-PRF, N: low-PRF)
+        Dual-PRF factor of each ray (N+1: low PRF, N: high-PRF)
     min_valid : int
         Minimum number of valid neighbours
 
@@ -646,13 +789,17 @@ def _vel_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
      v_ref : array
          Reference velocity for each gate
      """
-    mask, v_ny, prf_factor_arr = _default_4ref(data_ma, mask, v_ny,
-                                               prf_factor_arr)
+    
+    if mask is None:
+        mask = data_ma.mask
+    else:
+        mask= np.ma.mask_or(data_ma.mask, mask)
+
     vel_ma = np.ma.array(data=data_ma.data, mask=mask)
 
     if method == 'cmean_sc':
         v_ref = _vref_cmean_sc(vel_ma, kernel=kernel, v_ny=v_ny, 
-                              mask=mask, prf_factor_arr=prf_factor_arr,
+                              prf_factor_arr=prf_factor_arr,
                               min_valid=min_valid)
 
     else:
@@ -660,13 +807,12 @@ def _vel_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
                    'cmean': local_cmean}
  
         # Mask gates which do not have a minimum number of neighbours
-        nmin_mask = _min_valid_mask(mask, kernel=kernel,
+        nmin_mask = _min_valid_mask(data_ma.mask, kernel=kernel,
                                         min_th=min_valid)
         new_mask = np.ma.mask_or(data_ma.mask, nmin_mask)
 
         if method == 'cmean':
-            ph_arr = np.ma.array(data=data_ma.data * (m.pi / v_ny), 
-                                 mask=mask)
+            ph_arr = vel_ma * (m.pi / v_ny)
             v_ref = (v_ny / m.pi) * stat_fn[method](ph_arr, kernel=kernel)
 
         else:
@@ -679,18 +825,19 @@ def _vel_ref(data_ma, method='mean', kernel=np.ones((5, 5)), v_ny=None,
     return v_ref
 
 
-def _vref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None, 
-                  mask=None, prf_factor_arr=None, min_valid=1):
+def _vref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None, prf_factor_arr=None, min_valid=1):
     """
     Estimate reference velocity using 'cmean_sc' method (Altube et al., 2017):
     local circular mean velocity, phase space statistics with PRF-based scaling.
     
     """
 
+    mask = data_ma.mask
+
     # 'Convolution' kernels for calculating ref. velocity
     k_h, k_l = _prf_hl_kernels(kernel)
 
-    # Build signature array (high->1, low->-1)
+    # Build signature array (high->-1, low->1)
     sign_arr = _sign_array(prf_factor_arr)
 
     # Convert to phases and scale values based on the PRF
@@ -703,6 +850,7 @@ def _vref_cmean_sc(data_ma, kernel=np.ones((7, 7)), v_ny=None,
 
     # Reference PHASE for outlier detection:
     ph_ref = sign_arr*(b_l-b_h)
+    ph_ref = np.ma.arctan2(np.ma.sin(ph_ref), np.ma.cos(ph_ref))
 
     # Mask gates which do not have a minimum number of neighbours
     mask_h = _min_valid_mask(mask, kernel=k_h, min_th=min_valid)
